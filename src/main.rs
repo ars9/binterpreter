@@ -4,6 +4,7 @@ use std::convert::TryInto;
 
 type Value = i64;
 type Var = u32;
+type Label = u32;
 
 #[derive(Debug)]
 enum OpCode {
@@ -13,6 +14,10 @@ enum OpCode {
     Add,
     Multiply,
     ReturnValue,
+    Label,
+    Compare,
+    Jump,
+    JumpEq,
     Unknown,
 }
 
@@ -25,6 +30,10 @@ impl From<u8> for OpCode {
             0x3 => OpCode::Add,
             0x4 => OpCode::Multiply,
             0x5 => OpCode::ReturnValue,
+            0x6 => OpCode::Label,
+            0x7 => OpCode::Compare,
+            0x8 => OpCode::Jump,
+            0x9 => OpCode::JumpEq,
             _ => OpCode::Unknown,
         }
     }
@@ -38,6 +47,10 @@ enum ByteCode {
     Add,            // 3
     Multiply,       // 4
     ReturnValue,    // 5
+    Label(Label),   // 6
+    Compare,        // 7
+    Jump(Label),    // 8
+    JumpEq(Label),  // 9
 }
 
 fn main() {
@@ -69,6 +82,7 @@ type Cursor = usize;
 enum ParserError {
     ValueError(OpCode, Cursor),
     VariableError(OpCode, Cursor),
+    LabelError(OpCode, Cursor),
     UnknownOpcode(Cursor),
     EmptyProgram,
 }
@@ -79,9 +93,10 @@ type Line = usize;
 enum ProgramError {
     StackError(Line),
     UninitializedVariable(Line),
+    LabelError(Line),
 }
 
-fn parse(bytes: Vec<u8>) -> Result<Vec<ByteCode>, ParserError> {
+fn parse(bytes: &Vec<u8>) -> Result<Vec<ByteCode>, ParserError> {
     if bytes.len() == 0 {
         return Err(ParserError::EmptyProgram);
     }
@@ -91,6 +106,7 @@ fn parse(bytes: Vec<u8>) -> Result<Vec<ByteCode>, ParserError> {
 
     let val_size = std::mem::size_of::<Value>();
     let var_size = std::mem::size_of::<Var>();
+    let label_size = std::mem::size_of::<Label>();
 
     loop {
         let opcode: OpCode = bytes[cursor].into();
@@ -125,6 +141,31 @@ fn parse(bytes: Vec<u8>) -> Result<Vec<ByteCode>, ParserError> {
             OpCode::Add => ByteCode::Add,
             OpCode::Multiply => ByteCode::Multiply,
             OpCode::ReturnValue => ByteCode::ReturnValue,
+            OpCode::Label => {
+                let label = match bytes[cursor..cursor + label_size].try_into() {
+                    Ok(label) => u32::from_le_bytes(label),
+                    Err(_) => return Err(ParserError::LabelError(opcode, cursor)),
+                };
+                cursor += label_size;
+                ByteCode::Label(label)
+            }
+            OpCode::Compare => ByteCode::Compare,
+            OpCode::Jump => {
+                let label = match bytes[cursor..cursor + label_size].try_into() {
+                    Ok(label) => u32::from_le_bytes(label),
+                    Err(_) => return Err(ParserError::LabelError(opcode, cursor)),
+                };
+                cursor += label_size;
+                ByteCode::Jump(label)
+            }
+            OpCode::JumpEq => {
+                let label = match bytes[cursor..cursor + label_size].try_into() {
+                    Ok(label) => u32::from_le_bytes(label),
+                    Err(_) => return Err(ParserError::LabelError(opcode, cursor)),
+                };
+                cursor += label_size;
+                ByteCode::JumpEq(label)
+            }
             OpCode::Unknown => {
                 println!("Unknown opcode: {:?}", bytes[cursor]);
                 return Err(ParserError::UnknownOpcode(cursor));
@@ -142,7 +183,7 @@ fn parse(bytes: Vec<u8>) -> Result<Vec<ByteCode>, ParserError> {
 }
 
 fn exec(bytes: Vec<u8>) -> Option<Value> {
-    let program = match parse(bytes) {
+    let program = match parse(bytes.as_ref()) {
         Ok(program) => program,
         Err(error) => match error {
             ParserError::EmptyProgram => {
@@ -163,18 +204,38 @@ fn exec(bytes: Vec<u8>) -> Option<Value> {
                     opcode, cursor
                 );
             }
+            ParserError::LabelError(opcode, cursor) => {
+                panic!(
+                    "Couldn't read lable for opcode {:?} at position {:}",
+                    opcode, cursor
+                )
+            }
         },
     };
 
-    let mut cursor: usize = 0;
     let mut stack: Vec<Value> = vec![];
     let mut result: Option<Value> = None;
     let mut variables: HashMap<Var, Value> = HashMap::new();
+    let mut labels: HashMap<Label, usize> = HashMap::new();
 
+    // Build label pointers before execution
+    let mut cursor: usize = 0;
+    for bytecode in &program {
+        cursor += 1;
+        if let ByteCode::Label(label) = bytecode {
+            labels.insert(*label, cursor);
+        }
+    }
+
+    println!("labels: {:?}", labels);
+
+    let mut cursor: usize = 0;
     loop {
         let bytecode = &program[cursor];
 
         cursor += 1;
+
+        println!("bytecode {:} {:?}", cursor, bytecode);
 
         let result = match bytecode {
             ByteCode::LoadVal(val) => {
@@ -221,7 +282,60 @@ fn exec(bytes: Vec<u8>) -> Option<Value> {
                 if val.is_none() {
                     Err(ProgramError::UninitializedVariable(cursor))
                 } else {
-                    stack.push(*val.unwrap());
+                    let val = *val.unwrap();
+                    stack.push(val);
+                    Ok(())
+                }
+            }
+            ByteCode::Label(_) => Ok(()),
+            ByteCode::Compare => {
+                let mut result: Value = 0;
+
+                let v1 = stack.pop();
+                let v2 = stack.pop();
+
+                if v1.is_none() || v2.is_none() {
+                    Err(ProgramError::UninitializedVariable(cursor))
+                } else {
+                    if v1 > v2 {
+                        result = 1;
+                    } else if v1 < v2 {
+                        result = -1;
+                    }
+                    println!("Comparison is {:}", result);
+                    stack.push(result);
+                    Ok(())
+                }
+            }
+            ByteCode::Jump(label) => {
+                let pointer = labels.get(label);
+
+                if pointer.is_none() {
+                    Err(ProgramError::LabelError(cursor))
+                } else {
+                    cursor = *pointer.unwrap();
+                    println!("Jump to {:}", cursor);
+                    Ok(())
+                }
+            }
+            ByteCode::JumpEq(label) => {
+                let pointer = labels.get(label);
+
+                println!("Stack is {:?}", stack);
+
+                let val = stack.pop();
+
+                if val.is_none() {
+                    Err(ProgramError::StackError(cursor))
+                } else if pointer.is_none() {
+                    Err(ProgramError::LabelError(cursor))
+                } else {
+                    if val.unwrap() == 0 {
+                        cursor = *pointer.unwrap();
+                        println!("JumpEq to {:}", cursor);
+                    } else {
+                        println!("Not jumping anywhere");
+                    }
                     Ok(())
                 }
             }
@@ -234,6 +348,9 @@ fn exec(bytes: Vec<u8>) -> Option<Value> {
                 }
                 ProgramError::UninitializedVariable(line) => {
                     panic!("{:?} (line #{:}): Uninitialized variable", bytecode, line);
+                }
+                ProgramError::LabelError(line) => {
+                    panic!("{:?} (line #{:}): Uninitialized label", bytecode, line);
                 }
             }
         }
@@ -281,9 +398,7 @@ mod tests {
         ]
         .to_vec();
 
-        let result = exec(bytes);
-
-        assert_eq!(result, Some(3));
+        assert_eq!(exec(bytes), Some(3));
     }
 
     #[test]
@@ -296,9 +411,7 @@ mod tests {
         ]
         .to_vec();
 
-        let result = exec(bytes);
-
-        assert_eq!(result, Some(100));
+        assert_eq!(exec(bytes), Some(100));
     }
 
     #[test]
@@ -317,8 +430,32 @@ mod tests {
         ]
         .to_vec();
 
-        let result = exec(bytes);
+        assert_eq!(exec(bytes), Some(4));
+    }
 
-        assert_eq!(result, Some(4));
+    #[test]
+    fn loop_test() {
+        let bytes: Vec<u8> = [
+            0, 10, 0, 0, 0, 0, 0, 0, 0, // LOAD_VAL 10
+            1, 0, 0, 0, 0, // WRITE_VAR 'x'
+            0, 0, 0, 0, 0, 0, 0, 0, 0, // LOAD_VAL 0
+            1, 1, 0, 0, 0, // WRITE_VAR 'y'
+            6, 0, 0, 0, 0, // LABEL 'loop'
+            2, 1, 0, 0, 0, // READ_VAR 'y'
+            0, 1, 0, 0, 0, 0, 0, 0, 0, // LOAD_VAL 1
+            3, // ADD
+            1, 1, 0, 0, 0, // WRITE_VAR 'y'
+            2, 0, 0, 0, 0, // READ_VAR 'x'
+            2, 1, 0, 0, 0, // READ_VAR 'y'
+            7, // CMP
+            9, 1, 0, 0, 0, // JUMP_EQ 'exit'
+            8, 0, 0, 0, 0, // JUMP 'loop'
+            6, 1, 0, 0, 0, // LABEL 'exit'
+            2, 1, 0, 0, 0, // READ_VAR 'y'
+            5, // RETURN_VALUE
+        ]
+        .to_vec();
+
+        assert_eq!(exec(bytes), Some(10));
     }
 }
