@@ -1,0 +1,23 @@
+# Set x=1
+LOAD_VAL 1
+WRITE_VAR x
+
+# Set y=2
+LOAD_VAL 2
+WRITE_VAR y
+
+# Put x and 1 to the stack
+READ_VAR x
+LOAD_VAL 1
+
+# Perform addition
+ADD
+
+# Add y to the stack
+READ_VAR y
+
+# Perform multiplication
+MULTIPLY
+
+# Return result
+RETURN_VALUE

@@ -1,6 +1,14 @@
-use std::{collections::HashMap, panic};
+use std::{
+    collections::HashMap,
+    convert::TryInto,
+    env::{args, Args},
+    fs::{read, File},
+    io::{stdout, BufRead, BufReader, ErrorKind, Write},
+    mem::size_of,
+    panic,
+};
 
-use std::convert::TryInto;
+use regex::Regex;
 
 type Value = i64;
 type Var = u32;
@@ -39,6 +47,24 @@ impl From<u8> for OpCode {
     }
 }
 
+impl Into<u8> for OpCode {
+    fn into(self) -> u8 {
+        match self {
+            OpCode::LoadVal => 0x0,
+            OpCode::WriteVar => 0x1,
+            OpCode::ReadVar => 0x2,
+            OpCode::Add => 0x3,
+            OpCode::Multiply => 0x4,
+            OpCode::ReturnValue => 0x5,
+            OpCode::Label => 0x6,
+            OpCode::Compare => 0x7,
+            OpCode::Jump => 0x8,
+            OpCode::JumpEq => 0x9,
+            OpCode::Unknown => panic!("OpCode doesn't exist"),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ByteCode {
     LoadVal(Value), // 0
@@ -53,18 +79,45 @@ enum ByteCode {
     JumpEq(Label),  // 9
 }
 
-fn main() {
-    let mut args = std::env::args().into_iter();
-    let executable = args.next().unwrap();
+fn usage_full(basepath: &String) {
+    println!("Usage: {:} <SUBCOMMAND> <OPTIONS>", basepath);
+}
 
+fn usage_exec(basepath: &String) {
+    println!("Usage: {:} exec <PATH_TO_FILE>", basepath);
+}
+
+fn main() {
+    let mut args = args().into_iter();
+    let basepath = args.next().unwrap();
+
+    if let Some(subcommand) = args.next() {
+        match subcommand.as_ref() {
+            "exec" => cmd_exec(&basepath, &mut args),
+            "compile" => cmd_compile(&basepath, &mut args),
+            _ => usage_full(&basepath),
+        }
+    } else {
+        usage_full(&basepath);
+    }
+}
+
+fn cmd_compile(basepath: &String, args: &mut Args) {
     if let Some(path) = args.next() {
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                let result = exec(bytes);
-                println!("Result: {:?}", result);
+        match File::open(path) {
+            Ok(f) => {
+                let buffer = BufReader::new(f);
+                let result = compile(buffer).unwrap();
+                let mut out = stdout();
+                match out.write_all(&result) {
+                    Ok(_) => out.flush().unwrap(),
+                    Err(error) => {
+                        panic!("Unable to write output: {}", error);
+                    }
+                }
             }
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                if e.kind() == ErrorKind::PermissionDenied {
                     eprintln!("please run again with appropriate permissions.");
                     return;
                 }
@@ -72,7 +125,27 @@ fn main() {
             }
         }
     } else {
-        println!("Usage: {:} PATH_TO_BINARY", executable);
+        usage_exec(&basepath);
+    }
+}
+
+fn cmd_exec(basepath: &String, args: &mut Args) {
+    if let Some(path) = args.next() {
+        match read(path) {
+            Ok(bytes) => {
+                let result = exec(bytes);
+                println!("Result: {:?}", result);
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::PermissionDenied {
+                    eprintln!("please run again with appropriate permissions.");
+                    return;
+                }
+                panic!("{}", e);
+            }
+        }
+    } else {
+        usage_exec(&basepath);
     }
 }
 
@@ -96,6 +169,141 @@ enum ProgramError {
     LabelError(Line),
 }
 
+#[derive(Debug)]
+enum CompilerError {}
+
+fn compile(buffer: BufReader<File>) -> Result<Vec<u8>, CompilerError> {
+    let mut output: Vec<u8> = vec![];
+
+    let mut cursor = 0;
+    let mut variables: HashMap<String, Var> = HashMap::new();
+    let mut labels: HashMap<String, Label> = HashMap::new();
+
+    let re_var_name = Regex::new(r"^[a-zA-Z$_]?[a-zA-Z0-9_]+$").unwrap();
+
+    for line in buffer.lines() {
+        cursor += 1;
+        if line.is_err() {
+            panic!("Can't read line from source");
+        }
+        let line = line.unwrap();
+        let mut words = line.trim().split_whitespace();
+        match words.next() {
+            Some("LOAD_VAL") => {
+                if let Some(val) = words.next() {
+                    let val = val.parse::<Value>().unwrap();
+                    output.push(OpCode::LoadVal.into());
+                    output.extend_from_slice(&val.to_le_bytes());
+                } else {
+                    panic!("LOAD_VAL: missing value at line {}", cursor);
+                }
+            }
+            Some("WRITE_VAR") => {
+                if let Some(var) = words.next() {
+                    if !re_var_name.is_match(var) {
+                        panic!(
+                            "WRITE_VAR: malformed variable name '{}' at line {}",
+                            var, cursor
+                        );
+                    }
+                    if !variables.contains_key(var) {
+                        variables.insert(var.to_string(), variables.len().try_into().unwrap());
+                    }
+                    let var = variables.get(var).unwrap();
+                    output.push(OpCode::WriteVar.into());
+                    output.extend_from_slice(&var.to_le_bytes());
+                } else {
+                    panic!("WRITE_VAR: missing variable name at line {}", cursor);
+                }
+            }
+            Some("READ_VAR") => {
+                if let Some(var) = words.next() {
+                    if !variables.contains_key(var) {
+                        panic!(
+                            "READ_VAR: Variable {} does not exist at line {}",
+                            var, cursor
+                        );
+                    }
+                    let var = variables.get(var).unwrap();
+                    output.push(OpCode::ReadVar.into());
+                    output.extend_from_slice(&var.to_le_bytes());
+                } else {
+                    panic!("READ_VAR: missing variable name at line {}", cursor);
+                }
+            }
+            Some("ADD") => {
+                output.push(OpCode::Add.into());
+            }
+            Some("MULTIPLY") => {
+                output.push(OpCode::Multiply.into());
+            }
+            Some("RETURN_VALUE") => {
+                output.push(OpCode::ReturnValue.into());
+            }
+            Some("LABEL") => {
+                if let Some(label) = words.next() {
+                    if !re_var_name.is_match(label) {
+                        panic!("LABEL: malformed label name '{}' at line {}", label, cursor);
+                    }
+                    if !labels.contains_key(label) {
+                        labels.insert(label.to_string(), labels.len().try_into().unwrap());
+                    }
+                    let label = labels.get(label).unwrap();
+                    output.push(OpCode::Label.into());
+                    output.extend_from_slice(&label.to_le_bytes());
+                } else {
+                    panic!("LABEL: missing label name at line {}", cursor);
+                }
+            }
+            Some("CMP") => {
+                output.push(OpCode::Compare.into());
+            }
+            Some("JUMP") => {
+                if let Some(label) = words.next() {
+                    if !re_var_name.is_match(label) {
+                        panic!(
+                            "JUMP: malformed label name '{}' at line {}",
+                            label, cursor
+                        );
+                    }
+                    if !labels.contains_key(label) {
+                        labels.insert(label.to_string(), labels.len().try_into().unwrap());
+                    }
+                    let label = labels.get(label).unwrap();
+                    output.push(OpCode::Jump.into());
+                    output.extend_from_slice(&label.to_le_bytes());
+                } else {
+                    panic!("JUMP: missing label name at line {}", cursor);
+                }
+            }
+            Some("JUMP_EQ") => {
+                if let Some(label) = words.next() {
+                    if !re_var_name.is_match(label) {
+                        panic!(
+                            "JUMP_EQ: malformed label name '{}' at line {}",
+                            label, cursor
+                        );
+                    }
+                    if !labels.contains_key(label) {
+                        labels.insert(label.to_string(), labels.len().try_into().unwrap());
+                    }
+                    let label = labels.get(label).unwrap();
+                    output.push(OpCode::JumpEq.into());
+                    output.extend_from_slice(&label.to_le_bytes());
+                } else {
+                    panic!("JUMP_EQ: missing label name at line {}", cursor);
+                }
+            }
+            Some("") => (),
+            Some("#") => (),
+            Some(operator) => panic!("{}: unknown operator at line {}", operator, cursor),
+            None => (),
+        }
+    }
+
+    Ok(output)
+}
+
 fn parse(bytes: &Vec<u8>) -> Result<Vec<ByteCode>, ParserError> {
     if bytes.len() == 0 {
         return Err(ParserError::EmptyProgram);
@@ -104,9 +312,9 @@ fn parse(bytes: &Vec<u8>) -> Result<Vec<ByteCode>, ParserError> {
     let mut cursor: usize = 0;
     let mut program: Vec<ByteCode> = vec![];
 
-    let val_size = std::mem::size_of::<Value>();
-    let var_size = std::mem::size_of::<Var>();
-    let label_size = std::mem::size_of::<Label>();
+    let val_size = size_of::<Value>();
+    let var_size = size_of::<Var>();
+    let label_size = size_of::<Label>();
 
     loop {
         let opcode: OpCode = bytes[cursor].into();

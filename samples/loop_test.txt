@@ -1,0 +1,32 @@
+# Set x=10
+LOAD_VAL 10
+WRITE_VAR x
+
+# Set y=0
+LOAD_VAL 0
+WRITE_VAR y
+
+# Start loop
+LABEL loop
+
+# Increment y
+READ_VAR y
+LOAD_VAL 1
+ADD
+WRITE_VAR y
+
+# Comapre x to y
+READ_VAR x
+READ_VAR y
+CMP
+
+# Exit if equal
+JUMP_EQ exit
+
+# Return to loop start
+JUMP loop
+
+# Read last y value and return
+LABEL exit
+READ_VAR y
+RETURN_VALUE
