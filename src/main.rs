@@ -227,15 +227,11 @@ fn exec(bytes: Vec<u8>) -> Option<Value> {
         }
     }
 
-    println!("labels: {:?}", labels);
-
     let mut cursor: usize = 0;
     loop {
         let bytecode = &program[cursor];
 
         cursor += 1;
-
-        println!("bytecode {:} {:?}", cursor, bytecode);
 
         let result = match bytecode {
             ByteCode::LoadVal(val) => {
@@ -302,7 +298,6 @@ fn exec(bytes: Vec<u8>) -> Option<Value> {
                     } else if v1 < v2 {
                         result = -1;
                     }
-                    println!("Comparison is {:}", result);
                     stack.push(result);
                     Ok(())
                 }
@@ -314,14 +309,11 @@ fn exec(bytes: Vec<u8>) -> Option<Value> {
                     Err(ProgramError::LabelError(cursor))
                 } else {
                     cursor = *pointer.unwrap();
-                    println!("Jump to {:}", cursor);
                     Ok(())
                 }
             }
             ByteCode::JumpEq(label) => {
                 let pointer = labels.get(label);
-
-                println!("Stack is {:?}", stack);
 
                 let val = stack.pop();
 
@@ -332,9 +324,6 @@ fn exec(bytes: Vec<u8>) -> Option<Value> {
                 } else {
                     if val.unwrap() == 0 {
                         cursor = *pointer.unwrap();
-                        println!("JumpEq to {:}", cursor);
-                    } else {
-                        println!("Not jumping anywhere");
                     }
                     Ok(())
                 }
